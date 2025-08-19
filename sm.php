@@ -267,13 +267,21 @@ function sendTXTList() {
     foreach ($grouped as $group => $items) {
         $output .= htmlspecialchars($group) . ",#genre#\n";
         foreach ($items as $chan) {
-            // 输出漂亮路径：/sm/{code}/index.m3u8
-            $code = idToCode($chan['id']);
-            $output .= sprintf("%s,%s/%s/index.m3u8\n",
-                htmlspecialchars($chan['name']),
-                $prettyBase,
-                rawurlencode($code)
-            );
+            // 对于订阅信息频道，直接使用其URL
+            if (isset($chan['url']) && !empty($chan['url'])) {
+                $output .= sprintf("%s,%s\n",
+                    htmlspecialchars($chan['name']),
+                    $chan['url']
+                );
+            } else {
+                // 其他频道输出漂亮路径：/sm/{code}/index.m3u8
+                $code = idToCode($chan['id']);
+                $output .= sprintf("%s,%s/%s/index.m3u8\n",
+                    htmlspecialchars($chan['name']),
+                    $prettyBase,
+                    rawurlencode($code)
+                );
+            }
         }
         $output .= "\n";
     }
@@ -294,7 +302,21 @@ function getChannelList($forceRefresh = false) {
                 if (($channelsData['cache_expire_time'] - $now) <= 300) {
                     $forceRefresh = true;
                 } else {
-                    return $channelsData['channels'];
+                    // 更新订阅信息频道的剩余时间显示
+                    $channels = $channelsData['channels'];
+                    $timeRemaining = $channelsData['cache_expire_time'] - $now;
+                    $remainingText = formatTime($timeRemaining);
+                    
+                    // 更新第一个订阅频道的名称
+                    foreach ($channels as &$chan) {
+                        if ($chan['id'] === 'cache_status_valid') {
+                            $chan['name'] = "剩余有效期:{$remainingText}";
+                            break;
+                        }
+                    }
+                    unset($chan); // 清除引用
+                    
+                    return $channels;
                 }
             } else {
                 $forceRefresh = true;
@@ -346,10 +368,36 @@ function getChannelList($forceRefresh = false) {
         throw new Exception("频道列表解析失败");
     }
 
+    // 在列表最前面添加"我的订阅"分组
+    $now = time();
+    $expireTime = $now + CONFIG['cache_ttl'];
+    $timeRemaining = $expireTime - $now;
+    
+    // 格式化剩余时间
+    $remainingText = formatTime($timeRemaining);
+    
+    // 创建订阅信息频道
+    $subscriptionChannels = [
+        [
+            'id' => 'cache_status_valid',
+            'name' => "剩余有效期:{$remainingText}",
+            'group' => '我的订阅',
+            'logo' => '',
+            'url' => 'https://hellotv.dpdns.org/stream/dy.mp4'
+        ],
+        [
+            'id' => 'cache_status_refresh',
+            'name' => '不在有效期请刷新订阅',
+            'group' => '我的订阅',
+            'logo' => '',
+            'url' => 'https://hellotv.dpdns.org/stream/dy.mp4'
+        ]
+    ];
+    
+    // 将订阅频道添加到列表最前面
+    $list = array_merge($subscriptionChannels, $list);
+
     if (extension_loaded('apcu')) {
-        $now = time();
-        $expireTime = $now + CONFIG['cache_ttl'];
-        
         $channelsData = [
             'channels' => $list,
             'cache_start_time' => $now,
@@ -357,7 +405,7 @@ function getChannelList($forceRefresh = false) {
         ];
         
         apcu_store('smart_channels_data', $channelsData, CONFIG['cache_ttl']);
-        error_log("[ChannelList] 频道列表已更新，共 " . count($list) . " 个频道，缓存开始时间: " . date('Y-m-d H:i:s', $now) . "，失效时间: " . date('Y-m-d H:i:s', $expireTime));
+        error_log("[ChannelList] 频道列表已更新，共 " . count($list) . " 个频道（含订阅信息），缓存开始时间: " . date('Y-m-d H:i:s', $now) . "，失效时间: " . date('Y-m-d H:i:s', $expireTime));
     }
 
     return $list;
