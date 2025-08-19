@@ -44,8 +44,8 @@ function getUpstream($stickyKey = null) {
 
 // 主路由控制
 try {
-    // 定期清理过期缓存（每10%的请求概率执行）
-    if (extension_loaded('apcu') && (mt_rand(1, 10) === 1)) {
+    // 定期清理过期缓存（每20%的请求概率执行，提高清理频率）
+    if (extension_loaded('apcu') && (mt_rand(1, 5) === 1)) {
         cleanupExpiredCache();
     }
     
@@ -80,27 +80,50 @@ function cleanupExpiredCache() {
     }
     
     try {
-        $cacheInfo = apcu_cache_info('user');
-        if (!isset($cacheInfo['cache_list']) || !is_array($cacheInfo['cache_list'])) {
-            return;
-        }
-        
         $now = time();
         $cleaned = 0;
+        $channelsExpired = false;
         
-        foreach ($cacheInfo['cache_list'] as $item) {
-            if (isset($item['ttl']) && $item['ttl'] > 0) {
-                $timeToExpire = $item['ttl'] - ($now - $item['mtime']);
-                if ($timeToExpire <= 0) {
-                    apcu_delete($item['key']);
-                    $cleaned++;
+        // 首先检查频道列表缓存是否过期
+        $channelsData = apcu_fetch('smart_channels_data');
+        if ($channelsData !== false && isset($channelsData['cache_expire_time'])) {
+            if ($now >= $channelsData['cache_expire_time']) {
+                apcu_delete('smart_channels_data');
+                $cleaned++;
+                $channelsExpired = true;
+                error_log("[Cleanup] 频道列表缓存已过期并被清理");
+            }
+        }
+        
+        // 清理其他过期缓存项
+        $cacheInfo = apcu_cache_info('user');
+        if (isset($cacheInfo['cache_list']) && is_array($cacheInfo['cache_list'])) {
+            foreach ($cacheInfo['cache_list'] as $item) {
+                if (isset($item['key']) && $item['key'] !== 'smart_channels_data' && isset($item['ttl']) && $item['ttl'] > 0) {
+                    $timeToExpire = $item['ttl'] - ($now - $item['mtime']);
+                    if ($timeToExpire <= 0) {
+                        apcu_delete($item['key']);
+                        $cleaned++;
+                    }
                 }
             }
         }
         
         if ($cleaned > 0) {
-            error_log("[Cleanup] 清理了 $cleaned 个过期缓存项");
+            error_log("[Cleanup] 清理了 $cleaned 个过期缓存项" . ($channelsExpired ? "（包含频道列表）" : ""));
         }
+        
+        // 如果频道列表过期了，触发预热（在后台重新生成）
+        if ($channelsExpired) {
+            try {
+                // 异步预热频道列表，避免阻塞当前请求
+                getChannelList(true);
+                error_log("[Cleanup] 频道列表已重新生成");
+            } catch (Exception $e) {
+                error_log("[Cleanup] 重新生成频道列表失败: " . $e->getMessage());
+            }
+        }
+        
     } catch (Exception $e) {
         error_log("[Cleanup] 清理缓存时出错: " . $e->getMessage());
     }
@@ -242,6 +265,28 @@ function formatTime($seconds) {
     return floor($seconds / 86400) . "天";
 }
 
+// 检查并确保频道列表是最新的
+function ensureChannelListFresh() {
+    if (!extension_loaded('apcu')) {
+        return false;
+    }
+    
+    $channelsData = apcu_fetch('smart_channels_data');
+    if ($channelsData === false || !isset($channelsData['cache_expire_time'])) {
+        return false; // 缓存不存在
+    }
+    
+    $now = time();
+    if ($now >= $channelsData['cache_expire_time']) {
+        // 缓存已过期，清除并返回false
+        apcu_delete('smart_channels_data');
+        error_log("[EnsureFresh] 发现过期的频道列表缓存，已清除");
+        return false;
+    }
+    
+    return true; // 缓存仍然有效
+}
+
 // 生成TXT主列表
 function sendTXTList() {
     header("Cache-Control: no-store, no-cache, must-revalidate");
@@ -249,6 +294,11 @@ function sendTXTList() {
     header("Expires: 0");
 
     try {
+        // 确保频道列表是最新的
+        if (!ensureChannelListFresh()) {
+            error_log("[SendTXTList] 频道列表需要更新，强制刷新");
+        }
+        
         $channels = getChannelList();
     } catch (Exception $e) {
         header('HTTP/1.1 500 Internal Server Error');
@@ -300,6 +350,7 @@ function getChannelList($forceRefresh = false) {
             if ($now < $channelsData['cache_expire_time']) {
                 // 如果缓存将在5分钟内过期，提前刷新
                 if (($channelsData['cache_expire_time'] - $now) <= 300) {
+                    error_log("[ChannelList] 缓存即将过期，提前刷新（剩余" . ($channelsData['cache_expire_time'] - $now) . "秒）");
                     $forceRefresh = true;
                 } else {
                     // 更新订阅信息频道的剩余时间显示
@@ -321,9 +372,14 @@ function getChannelList($forceRefresh = false) {
                     return $channels;
                 }
             } else {
+                // 缓存已过期，清除过期缓存并强制刷新
+                error_log("[ChannelList] 缓存已过期，自动清除并重新生成（过期" . ($now - $channelsData['cache_expire_time']) . "秒）");
+                apcu_delete('smart_channels_data');
                 $forceRefresh = true;
             }
         } else {
+            // 缓存不存在或格式不正确
+            error_log("[ChannelList] 缓存不存在或格式不正确，将重新生成");
             $forceRefresh = true;
         }
     }
