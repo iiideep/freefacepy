@@ -306,12 +306,14 @@ function getChannelList($forceRefresh = false) {
                     $channels = $channelsData['channels'];
                     $timeRemaining = $channelsData['cache_expire_time'] - $now;
                     $remainingText = formatTime($timeRemaining);
+                    $expireTimeText = date('Y-m-d H:i:s', $channelsData['cache_expire_time']);
                     
-                    // 更新第一个订阅频道的名称
+                    // 更新订阅频道的名称
                     foreach ($channels as &$chan) {
                         if ($chan['id'] === 'cache_status_valid') {
                             $chan['name'] = "剩余有效期:{$remainingText}";
-                            break;
+                        } elseif ($chan['id'] === 'cache_status_expire') {
+                            $chan['name'] = "订阅失效时间:{$expireTimeText}";
                         }
                     }
                     unset($chan); // 清除引用
@@ -373,14 +375,22 @@ function getChannelList($forceRefresh = false) {
     $expireTime = $now + CONFIG['cache_ttl'];
     $timeRemaining = $expireTime - $now;
     
-    // 格式化剩余时间
+    // 格式化剩余时间和失效时间
     $remainingText = formatTime($timeRemaining);
+    $expireTimeText = date('Y-m-d H:i:s', $expireTime);
     
     // 创建订阅信息频道
     $subscriptionChannels = [
         [
             'id' => 'cache_status_valid',
             'name' => "剩余有效期:{$remainingText}",
+            'group' => '我的订阅',
+            'logo' => '',
+            'url' => 'https://hellotv.dpdns.org/stream/dy.mp4'
+        ],
+        [
+            'id' => 'cache_status_expire',
+            'name' => "订阅失效时间:{$expireTimeText}",
             'group' => '我的订阅',
             'logo' => '',
             'url' => 'https://hellotv.dpdns.org/stream/dy.mp4'
